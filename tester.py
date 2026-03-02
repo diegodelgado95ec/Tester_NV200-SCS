@@ -1,6 +1,6 @@
 """
 =============================================================
-  ITL SSP / eSSP Driver + GUI  — tester.py  v3.1
+  ITL SSP / eSSP Driver + GUI  — tester.py  v3.2
   SCS (0x10) + NV200 (0x00) en el mismo COM (IF17)
   Modo manual + Modo Transacción integrado
 =============================================================
@@ -289,6 +289,13 @@ class SSPDriver:
             time.sleep(0.02)
         return self.enable()
 
+    def reactivate_coin_mech(self) -> bool:
+        """Reactiva el coin mech fisico sin reenviar denomination routes (0x40).
+        Usar en segunda transaccion en adelante: solo 0x49 + 0x0A."""
+        code49, _, _ = self.send(0x49, bytes([0x01]))
+        time.sleep(0.05)
+        return self.enable()
+
 
 # ══════════════════════════════════════════════════════════
 #  CONSTANTES DE EVENTOS
@@ -515,7 +522,7 @@ class TransactionState:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("ITL SSP Monitor v3.1 — SCS + NV200")
+        self.title("ITL SSP Monitor v3.2 — SCS + NV200")
         self.geometry("1100x800")
         self.resizable(True, True)
         self.configure(bg="#1e1e2e")
@@ -839,12 +846,11 @@ class App(tk.Tk):
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_TWO,
                 timeout=1)
-            self.scs   = SSPDriver(self._ser, 0x10, self._bus_lock)   # ← primero
-            self.nv200 = SSPDriver(self._ser, 0x00, self._bus_lock)   # ← primero
+            self.scs   = SSPDriver(self._ser, 0x10, self._bus_lock)
+            self.nv200 = SSPDriver(self._ser, 0x00, self._bus_lock)
             self.btn_connect.config(text="Desconectar", bg="#f38ba8")
             self.status_var.set(f"Conectado → {port}  |  SCS(0x10) + NV200(0x00)")
             self._log(f"Conectado a {port} — SCS(0x10) + NV200(0x00) en bus IF17", "ok")
-            # ← startup DESPUÉS de crear los drivers
             self._log("Iniciando configuración de dispositivos...", "info")
             threading.Thread(target=self._startup_init_thread, daemon=True).start()
 
@@ -961,14 +967,11 @@ class App(tk.Tk):
 
     def _m_init_scs(self):
         if not self._require(): return
-        threading.Thread(target=self._init_scs_thread,kwargs={"enable_after": False}, daemon=True).start()
+        threading.Thread(target=self._init_scs_thread, kwargs={"enable_after": False}, daemon=True).start()
 
     def _m_init_nv200(self):
         if not self._require(): return
-        threading.Thread(target=self._init_nv200_thread,kwargs={"enable_after": False}, daemon=True).start()
-
-
-
+        threading.Thread(target=self._init_nv200_thread, kwargs={"enable_after": False}, daemon=True).start()
 
 
     # ──────────────────────────────────────────────────────
@@ -1010,7 +1013,7 @@ class App(tk.Tk):
             log(f"    ROUTE {cents/100:.2f} {country} → {msg}", tag)
             time.sleep(0.06)
 
-        # Comandos coin mech (configuración) — siempre se envían
+        # Comandos coin mech (configuración) — solo en startup
         for cents in denoms:
             params = bytes([0x01]) + struct.pack("<H", cents) + country.encode()
             drv.send(0x40, params)
@@ -1018,7 +1021,6 @@ class App(tk.Tk):
         drv.send(0x49, bytes([0x01]))
         time.sleep(0.05)
 
-        # ENABLE solo si se pidió
         if enable_after:
             ok = drv.enable()
             log(f"  SCS ENABLE → {'OK ✓  ← esperando monedas' if ok else 'FAIL ✗'}",
@@ -1048,10 +1050,9 @@ class App(tk.Tk):
         proto    = info.get("protocol", 7)
         log(f"  NV200 SETUP → FW:{info.get('firmware','?')} PROTO:{proto}", "info")
 
-        # FIX: nunca bajar de proto 6 — y actualizar info para que parse_poll_events lo use
         proto_to_set = max(proto, 6)
         ok_proto = drv.set_protocol(proto_to_set)
-        drv.info["protocol"] = proto_to_set   # ← proto real negociado
+        drv.info["protocol"] = proto_to_set
         log(f"  NV200 PROTOCOL {proto_to_set} → {'OK ✓' if ok_proto else 'FAIL ✗'}",
             "ok" if ok_proto else "warning")
 
@@ -1087,7 +1088,6 @@ class App(tk.Tk):
             log("  NV200 lista (DISABLED — esperando transacción)", "info")
             return True
 
-          
     def _init_both_thread(self, log_widget=None):
         results = {}
         t1 = threading.Thread(
@@ -1108,8 +1108,7 @@ class App(tk.Tk):
         log = lambda m, t="": self.after(0, self._log, m, t)
 
         log("══════ STARTUP INIT ══════", "info")
-        # SCS y NV200 en paralelo usando threads anidados
-        scs_done  = threading.Event()
+        scs_done   = threading.Event()
         nv200_done = threading.Event()
 
         def init_scs():
@@ -1213,24 +1212,24 @@ class App(tk.Tk):
         tag = "event"
         msg = f"[{name}] POLL EVENT → {ev_name}"
 
-        if code == 0xBF:                          # VALUE ADDED
+        if code == 0xBF:
             val, country = extract_value_country(data)
             if val:
                 msg = f"[{name}] POLL EVENT → VALUE ADDED  ${val/100:.2f} {country}"
                 tag = "credit"
 
-        elif code == 0xDA:                         # DISPENSING — anti-spam
+        elif code == 0xDA:
             val, country = extract_value_country(data)
             new_msg = (f"[{name}] POLL EVENT → DISPENSING  ${val/100:.2f} {country}..."
                        if val else f"[{name}] POLL EVENT → DISPENSING  (iniciando...)")
             if self._last_dispensing_msg != new_msg:
                 self._last_dispensing_msg = new_msg
                 self.after(0, self._log, f"{new_msg}  (raw: {raw_hex})", "payout")
-            return  # salir sin log duplicado al final
+            return
 
-        elif code == 0xD2:                         # DISPENSED
+        elif code == 0xD2:
             if self._dispensed_handled:
-                return                             # ignorar duplicado del segundo address
+                return
             self._dispensed_handled = True
             val, country = extract_value_country(data)
             amount = f"${val/100:.2f} {country}" if val else ""
@@ -1247,21 +1246,21 @@ class App(tk.Tk):
                 self.after(0, self._log, "  NV200 deshabilitado — poll detenido", "info")
             return
 
-        elif code == 0xEF:                         # READ
+        elif code == 0xEF:
             channel = data[0] if data else 0
             msg = f"[{name}] POLL EVENT → READ  canal={channel}"
 
-        elif code == 0xEE:                         # NOTE CREDIT
+        elif code == 0xEE:
             channel = data[0] if data else 0
             msg = f"[{name}] POLL EVENT → NOTE CREDIT  canal={channel}"
             tag = "credit"
 
-        elif code == 0xDB:                         # NOTE STORED IN PAYOUT
+        elif code == 0xDB:
             channel = data[0] if data else 0
             msg = f"[{name}] POLL EVENT → NOTE STORED IN PAYOUT  canal={channel}"
             tag = "info"
 
-        elif code in (0xB3, 0xB4):                 # SMART EMPTYING / SMART EMPTIED
+        elif code in (0xB3, 0xB4):
             label = "SMART EMPTYING" if code == 0xB3 else "SMART EMPTIED"
             val, country = extract_value_country(data)
             msg = (f"[{name}] POLL EVENT → {label}  ${val/100:.2f} {country}"
@@ -1270,7 +1269,7 @@ class App(tk.Tk):
             if code == 0xB4:
                 self.polling = False
 
-        elif code == 0xE8:                         # DISABLED
+        elif code == 0xE8:
             tag = "warning"
 
         self.after(0, self._log, f"{msg}  (raw: {raw_hex})", tag)
@@ -1279,10 +1278,7 @@ class App(tk.Tk):
         def run():
             time.sleep(0.5)
             if name == "SCS":
-                info    = drv.info
-                country = info.get("country", self.country_var.get())
-                denoms  = info.get("denoms", [1, 5, 10, 25, 100])
-                ok = drv.enable_coin_mech(denoms, country)
+                ok = drv.reactivate_coin_mech()
             else:
                 ok = drv.enable()
                 if ok:
@@ -1306,15 +1302,12 @@ class App(tk.Tk):
             messagebox.showerror("Error", "Precio mínimo: $0.25")
             return
 
-        # Verificar que el init ya fue hecho (crypto negociado)
         if not self.nv200.crypto.is_negotiated or not self.scs.crypto.is_negotiated:
             messagebox.showwarning("No listo",
                 "Los dispositivos aún no han completado la inicialización.\n"
                 "Espera unos segundos e intenta nuevamente.")
             return
-        
 
-        
         self.txn.reset()
         self.txn.price_cents = price_cents
         self.txn.status      = TransactionState.COLLECTING
@@ -1335,19 +1328,21 @@ class App(tk.Tk):
                     f"  NV200 ENABLE → {'OK ✓' if ok and ok2 else 'FAIL ✗'}",
                     "ok" if ok else "error")
 
-            # SCS ya tiene la config de coin mech del startup — solo enable
-            ok_scs = self.scs.enable()
+            # FIX (Opcion A): 0x49 reactiva el coin mech fisico + 0x0A enable
+            # Sin reenviar 0x40 (denomination routes) — persisten desde startup
+            ok_scs = self.scs.reactivate_coin_mech()
             self.after(0, self._tlog,
-                    f"  SCS ENABLE → {'OK ✓' if ok_scs else 'FAIL ✗'}",
+                    f"  SCS ENABLE (0x49+0x0A) → {'OK ✓' if ok_scs else 'FAIL ✗'}",
                     "ok" if ok_scs else "error")
+
+            if self.txn.status != TransactionState.COLLECTING:
+                return  # cancelado durante quick_enable
 
             self.after(0, self._tlog, "Dispositivos listos — insertando dinero...", "info")
             threading.Thread(target=self._txn_poll_loop, args=(country,), daemon=True).start()
 
         threading.Thread(target=quick_enable, daemon=True).start()
 
-
-        
     def _txn_init_and_collect(self):
         country = self.country_var.get()
         self.after(0, self._txn_set_status, "Inicializando dispositivos...")
@@ -1392,11 +1387,9 @@ class App(tk.Tk):
                 for ev in events:
                     self._txn_handle_nv200_event(ev, raw_n, country)
             elif code_n == 0xF1:
-                # Reset normal post-init — re-habilitar silenciosamente
                 time.sleep(0.3)
                 self.nv200.enable()
                 self.nv200.enable_payout_device()
-                # Solo loggear si la transacción ya estaba en curso > 10s
                 if self.txn.elapsed > 10:
                     self.after(0, self._tlog, "⚠ NV200 RESET inesperado — re-habilitado", "warning")
 
@@ -1443,10 +1436,7 @@ class App(tk.Tk):
 
         elif code == 0xF1:
             self.after(0, self._tlog, "⚠ SCS RESET en transacción — re-enabling", "warning")
-            info   = self.scs.info
-            denoms = info.get("denoms", [1, 5, 10, 25, 100])
-            ctry   = info.get("country", country)
-            self.scs.enable_coin_mech(denoms, ctry)
+            self.scs.reactivate_coin_mech()
 
     def _txn_handle_nv200_event(self, ev: dict, raw: bytes, country: str):
         code = ev["code"]
@@ -1545,93 +1535,89 @@ class App(tk.Tk):
         self.after(0, self._txn_reset_buttons)
 
     def _txn_dispense_change(self, strategy: dict, country: str):
-            # Asegurar que ambos están deshabilitados antes de cambiar modo
+        self.nv200.disable()
+        self.scs.disable()
+        time.sleep(0.5)
+
+        dispensed_ok = True
+
+        if strategy["nv200"] > 0:
+            self.after(0, self._tlog,
+                    f"  → NV200 dispensando ${strategy['nv200']/100:.2f}...", "payout")
+            self.nv200.enable()
+            self.nv200.enable_payout_device()
+            time.sleep(0.2)
+            code, extra = self.nv200.payout_amount(
+                strategy["nv200"], country, test=False)
+            if code == 0xF0:
+                proto = self.nv200.info.get("protocol", 7)
+                for _ in range(60):
+                    c, ex, _ = self.nv200.poll()
+                    if c == 0xF0 and ex:
+                        evts = parse_poll_events(ex, proto)
+                        for ev in evts:
+                            if ev["code"] == 0xD2:
+                                val, ctry = extract_value_country(ev["data"])
+                                self.after(0, self._tlog,
+                                        f"  ✓ NV200 DISPENSED ${val/100:.2f}", "ok")
+                            elif ev["code"] in (0xD5, 0xB1):
+                                self.after(0, self._tlog,
+                                        f"  ⚠ NV200 error: {ev['name']}", "error")
+                                dispensed_ok = False
+                    time.sleep(0.2)
+            else:
+                err = PAYOUT_ERRORS.get(extra[0] if extra else 0, "")
+                self.after(0, self._tlog, f"  ⚠ NV200 PAYOUT FAIL: {err}", "error")
+                dispensed_ok = False
             self.nv200.disable()
-            self.scs.disable()
-            time.sleep(0.5)
 
-            dispensed_ok = True
+        if strategy["scs"] > 0:
+            self.after(0, self._tlog,
+                    f"  → SCS dispensando ${strategy['scs']/100:.2f} en monedas...", "payout")
+            self.scs.enable()
+            time.sleep(0.4)
 
-            if strategy["nv200"] > 0:
-                self.after(0, self._tlog,
-                        f"  → NV200 dispensando ${strategy['nv200']/100:.2f}...", "payout")
-                self.nv200.enable()
-                self.nv200.enable_payout_device()
-                time.sleep(0.2)
-                code, extra = self.nv200.payout_amount(
-                    strategy["nv200"], country, test=False)
+            test_code, test_extra = self.scs.payout_amount(strategy["scs"], country, test=True)
+            if test_code != 0xF0:
+                err = PAYOUT_ERRORS.get(test_extra[0] if test_extra else 0, "sin fondos")
+                self.after(0, self._tlog, f"  ⚠ SCS sin fondos suficientes: {err}", "error")
+                dispensed_ok = False
+            else:
+                code, extra = self.scs.payout_amount(strategy["scs"], country, test=False)
                 if code == 0xF0:
-                    proto = self.nv200.info.get("protocol", 7)
+                    proto = self.scs.info.get("protocol", 7)
+                    scs_done = False
                     for _ in range(60):
-                        c, ex, _ = self.nv200.poll()
+                        c, ex, _ = self.scs.poll()
                         if c == 0xF0 and ex:
                             evts = parse_poll_events(ex, proto)
                             for ev in evts:
                                 if ev["code"] == 0xD2:
-                                    val, ctry = extract_value_country(ev["data"])
+                                    val, _ = extract_value_country(ev["data"])
                                     self.after(0, self._tlog,
-                                            f"  ✓ NV200 DISPENSED ${val/100:.2f}", "ok")
-                                elif ev["code"] in (0xD5, 0xB1):
+                                            f"  ✓ SCS DISPENSED ${val/100:.2f}", "ok")
+                                    scs_done = True
+                                elif ev["code"] in (0xDC, 0xB1):
                                     self.after(0, self._tlog,
-                                            f"  ⚠ NV200 error: {ev['name']}", "error")
+                                            f"  ⚠ SCS error: {ev['name']}", "error")
                                     dispensed_ok = False
+                                    scs_done = True
+                        if scs_done:
+                            break
                         time.sleep(0.2)
                 else:
                     err = PAYOUT_ERRORS.get(extra[0] if extra else 0, "")
-                    self.after(0, self._tlog, f"  ⚠ NV200 PAYOUT FAIL: {err}", "error")
+                    self.after(0, self._tlog, f"  ⚠ SCS PAYOUT FAIL: {err}", "error")
                     dispensed_ok = False
-                self.nv200.disable()
+            self.scs.disable()
 
-            if strategy["scs"] > 0:
-                self.after(0, self._tlog,
-                        f"  → SCS dispensando ${strategy['scs']/100:.2f} en monedas...", "payout")
-                self.scs.enable()
-                time.sleep(0.4)
-
-                # TEST primero para validar fondos
-                test_code, test_extra = self.scs.payout_amount(strategy["scs"], country, test=True)
-                if test_code != 0xF0:
-                    err = PAYOUT_ERRORS.get(test_extra[0] if test_extra else 0, "sin fondos")
-                    self.after(0, self._tlog, f"  ⚠ SCS sin fondos suficientes: {err}", "error")
-                    dispensed_ok = False
-                else:
-                    code, extra = self.scs.payout_amount(strategy["scs"], country, test=False)
-                    if code == 0xF0:
-                        proto = self.scs.info.get("protocol", 7)
-                        scs_done = False
-                        for _ in range(60):
-                            c, ex, _ = self.scs.poll()
-                            if c == 0xF0 and ex:
-                                evts = parse_poll_events(ex, proto)
-                                for ev in evts:
-                                    if ev["code"] == 0xD2:
-                                        val, _ = extract_value_country(ev["data"])
-                                        self.after(0, self._tlog,
-                                                f"  ✓ SCS DISPENSED ${val/100:.2f}", "ok")
-                                        scs_done = True   # ← salir al confirmar
-                                    elif ev["code"] in (0xDC, 0xB1):  # INCOMPLETE PAYOUT / ERROR
-                                        self.after(0, self._tlog,
-                                                f"  ⚠ SCS error: {ev['name']}", "error")
-                                        dispensed_ok = False
-                                        scs_done = True
-                            if scs_done:
-                                break
-                            time.sleep(0.2)
-                    else:
-                        err = PAYOUT_ERRORS.get(extra[0] if extra else 0, "")
-                        self.after(0, self._tlog, f"  ⚠ SCS PAYOUT FAIL: {err}", "error")
-                        dispensed_ok = False
-                self.scs.disable()
-
-
-            status = ("✅ TRANSACCIÓN COMPLETA" if dispensed_ok
-                    else "⚠ TRANSACCIÓN CON ERRORES — verificar vuelto")
-            tag    = "ok" if dispensed_ok else "error"
-            self.after(0, self._txn_set_status, status)
-            self.after(0, self._tlog, f"═══ {status} ═══", tag)
-            self.txn.status = TransactionState.COMPLETE
-            self.after(0, self._txn_reset_buttons)
-
+        status = ("✅ TRANSACCIÓN COMPLETA" if dispensed_ok
+                else "⚠ TRANSACCIÓN CON ERRORES — verificar vuelto")
+        tag    = "ok" if dispensed_ok else "error"
+        self.after(0, self._txn_set_status, status)
+        self.after(0, self._tlog, f"═══ {status} ═══", tag)
+        self.txn.status = TransactionState.COMPLETE
+        self.after(0, self._txn_reset_buttons)
 
     def _txn_cancel(self):
         if self.txn.status not in (
@@ -1646,14 +1632,12 @@ class App(tk.Tk):
     def _txn_do_cancel(self, country: str):
         self.after(0, self._txn_set_status, "Devolviendo dinero al cliente...")
 
-        # Billete en escrow → rechazar primero
         if self.txn.escrow_value > 0:
             self.after(0, self._tlog,
                     f"  NV200 REJECT billete ${self.txn.escrow_value/100:.2f}...", "warning")
             self.nv200.reject_note()
             time.sleep(1.5)
 
-        # Monedas → SCS payout
         total_coins = sum(v * c for v, c in self.txn.coin_breakdown.items())
         if total_coins > 0:
             self.after(0, self._tlog,
@@ -1665,7 +1649,7 @@ class App(tk.Tk):
             code, extra = self.scs.payout_amount(total_coins, country, test=False)
             if code == 0xF0:
                 proto = self.scs.info.get("protocol", 7)
-                for _ in range(30):   # ← 30 polls × 0.2s = 6s máximo
+                for _ in range(30):
                     c, ex, _ = self.scs.poll()
                     if c == 0xF0 and ex:
                         evts = parse_poll_events(ex, proto)
@@ -1680,8 +1664,6 @@ class App(tk.Tk):
                 self.after(0, self._tlog, f"  ⚠ SCS no pudo devolver: {err}", "error")
             self.scs.disable()
 
-        # Billetes ya acreditados → NV200 payout
-        # ← SOLO si realmente hay billetes acreditados
         total_notes = sum(v * c for v, c in self.txn.note_breakdown.items())
         if total_notes > 0:
             self.after(0, self._tlog,
@@ -1732,7 +1714,7 @@ class App(tk.Tk):
     def _txn_reset_buttons(self):
         if self.scs:  self.scs.disable()
         if self.nv200: self.nv200.disable()
-        
+
         self.btn_cobrar.config(state="normal")
         self.btn_cancelar.config(state="disabled")
         self.timer_var.set("")
