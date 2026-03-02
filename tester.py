@@ -1,6 +1,6 @@
 """
 =============================================================
-  ITL SSP / eSSP Driver + GUI  — tester.py  v3.2
+  ITL SSP / eSSP Driver + GUI  — tester.py  v3.3
   SCS (0x10) + NV200 (0x00) en el mismo COM (IF17)
   Modo manual + Modo Transacción integrado
 =============================================================
@@ -522,7 +522,7 @@ class TransactionState:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("ITL SSP Monitor v3.2 — SCS + NV200")
+        self.title("ITL SSP Monitor v3.3 — SCS + NV200")
         self.geometry("1100x800")
         self.resizable(True, True)
         self.configure(bg="#1e1e2e")
@@ -1551,6 +1551,8 @@ class App(tk.Tk):
                 strategy["nv200"], country, test=False)
             if code == 0xF0:
                 proto = self.nv200.info.get("protocol", 7)
+                # FIX v3.3: salir tan pronto llega DISPENSED — evita espera de ~60s
+                nv200_done = False
                 for _ in range(60):
                     c, ex, _ = self.nv200.poll()
                     if c == 0xF0 and ex:
@@ -1560,10 +1562,14 @@ class App(tk.Tk):
                                 val, ctry = extract_value_country(ev["data"])
                                 self.after(0, self._tlog,
                                         f"  ✓ NV200 DISPENSED ${val/100:.2f}", "ok")
+                                nv200_done = True
                             elif ev["code"] in (0xD5, 0xB1):
                                 self.after(0, self._tlog,
                                         f"  ⚠ NV200 error: {ev['name']}", "error")
                                 dispensed_ok = False
+                                nv200_done = True
+                    if nv200_done:
+                        break
                     time.sleep(0.2)
             else:
                 err = PAYOUT_ERRORS.get(extra[0] if extra else 0, "")
